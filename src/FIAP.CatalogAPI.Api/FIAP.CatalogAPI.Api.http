@@ -1,0 +1,6 @@
+@FIAP.CatalogAPI.Api_HostAddress = http://localhost:5233
+
+GET {{FIAP.CatalogAPI.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

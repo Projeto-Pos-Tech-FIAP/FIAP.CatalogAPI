@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="src/FIAP.CatalogAPI.Domain/FIAP.CatalogAPI.Domain.csproj" />
+  <Project Path="src/FIAP.CatalogAPI.Application/FIAP.CatalogAPI.Application.csproj" />
+  <Project Path="src/FIAP.CatalogAPI.Infrastructure/FIAP.CatalogAPI.Infrastructure.csproj" />
+  <Project Path="src/FIAP.CatalogAPI.Api/FIAP.CatalogAPI.Api.csproj" />
+  <Project Path="src/FIAP.CatalogAPI.Tests/FIAP.CatalogAPI.Tests.csproj" />
+</Solution>
