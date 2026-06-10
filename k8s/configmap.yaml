@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: catalog-api-config
+  namespace: fiap-games
+  labels:
+    app: catalog-api
+data:
+  ASPNETCORE_ENVIRONMENT: "Production"
+  ASPNETCORE_URLS: "http://+:8080"
+
+  # Kafka — uses Kubernetes Service DNS name within the cluster
+  Kafka__BootstrapServers: "kafka:9092"
+  Kafka__GroupId: "catalog-api-group"
+  Kafka__TopicOrderPlaced: "order-placed"
+  Kafka__TopicPaymentProcessed: "payment-processed"
+
+  # MongoDB — non-sensitive config
+  MongoDb__Host: "mongodb"
+  MongoDb__Port: "27017"
+  MongoDb__DatabaseName: "CatalogAudit"
+  MongoDb__CollectionName: "AuditLogs"
