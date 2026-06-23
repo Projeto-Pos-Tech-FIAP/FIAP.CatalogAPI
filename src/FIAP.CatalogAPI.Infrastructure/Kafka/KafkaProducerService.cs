@@ -41,6 +41,7 @@ public class KafkaProducerService : IKafkaProducerService, IDisposable
         try
         {
             var result = await _producer.ProduceAsync(topic, kafkaMessage, cancellationToken);
+
             _logger.LogInformation(
                 "Mensagem publicada no tópico '{Topic}' | Partition: {Partition} | Offset: {Offset}",
                 topic, result.Partition.Value, result.Offset.Value);

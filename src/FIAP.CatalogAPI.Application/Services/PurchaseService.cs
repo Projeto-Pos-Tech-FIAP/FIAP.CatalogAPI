@@ -22,7 +22,7 @@ public class PurchaseService : IPurchaseService
         _kafkaProducer = kafkaProducer;
     }
 
-    public async Task<PurchaseResponseDto> InitiatePurchaseAsync(PurchaseRequestDto dto, CancellationToken cancellationToken = default)
+    public async Task<PurchaseResponseDto> InitiatePurchaseAsync(PurchaseRequestDto dto, Guid userId, CancellationToken cancellationToken = default)
     {
         var game = await _gameRepository.GetByIdAsync(dto.GameId)
             ?? throw new NotFoundException("Game", dto.GameId);
@@ -30,20 +30,20 @@ public class PurchaseService : IPurchaseService
         if (!game.IsActive)
             throw new InvalidOperationException($"O jogo '{game.Title}' não está disponível para compra.");
 
-        var alreadyOwns = await _libraryRepository.UserOwnsGameAsync(dto.UserId, dto.GameId);
+        var alreadyOwns = await _libraryRepository.UserOwnsGameAsync(userId, dto.GameId);
         if (alreadyOwns)
-            throw new GameAlreadyOwnedException(dto.UserId, dto.GameId);
+            throw new GameAlreadyOwnedException(userId, dto.GameId);
 
         var correlationId = Guid.NewGuid().ToString();
 
-        var @event = new OrderPlacedEvent(dto.UserId, dto.GameId, game.BasePrice, correlationId);
+        var @event = new OrderPlacedEvent(userId, dto.GameId, game.BasePrice, correlationId);
 
         await _kafkaProducer.PublishAsync("order-placed", correlationId, @event, cancellationToken);
 
         return new PurchaseResponseDto
         {
             CorrelationId = correlationId,
-            UserId = dto.UserId,
+            UserId = userId,
             GameId = dto.GameId,
             Price = game.BasePrice,
             Status = "Pending",

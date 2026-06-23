@@ -5,6 +5,7 @@ using FIAP.CatalogAPI.Domain.Interfaces;
 using FIAP.CatalogAPI.Infrastructure.Data.Context;
 using FIAP.CatalogAPI.Infrastructure.Data.Repositories;
 using FIAP.CatalogAPI.Infrastructure.Data.Services;
+using FIAP.CatalogAPI.Infrastructure.Identity;
 using FIAP.CatalogAPI.Infrastructure.Kafka;
 using FIAP.CatalogAPI.Infrastructure.Options;
 using Microsoft.EntityFrameworkCore;
@@ -41,6 +42,11 @@ public static class InfrastructureServiceExtensions
 
         // AutoMapper
         services.AddAutoMapper(typeof(MappingProfile).Assembly);
+
+        // Keycloak
+        services.Configure<KeycloakSettings>(options =>
+            configuration.GetSection(KeycloakSettings.SectionName).Bind(options));
+        services.AddHttpClient<IKeycloakService, KeycloakService>();
 
         return services;
     }

@@ -22,9 +22,7 @@ RUN dotnet publish src/FIAP.CatalogAPI.Api/FIAP.CatalogAPI.Api.csproj \
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 WORKDIR /app
 
-# Create non-root user for security
-RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
-USER appuser
+USER app
 
 COPY --from=build /app/publish .
 
