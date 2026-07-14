@@ -41,6 +41,11 @@ public class Game : SoftDelete
 
     public ICollection<LibraryGame> LibraryGames { get; set; } = new List<LibraryGame>();
 
+    // Construtor sem parâmetros para materialização via EF Core — o construtor público abaixo
+    // tem um parâmetro DateTime? (releaseDate) que não bate com o tipo da propriedade ReleaseDate
+    // (DateTime não-anulável), então o EF não consegue usá-lo para reconstruir a entidade a partir do banco.
+    private Game() { }
+
     public Game(string title, decimal basePrice, Guid createdBy, string? description = null,
         string? developer = null, string? publisher = null, DateTime? releaseDate = null, bool isActive = true)
     {

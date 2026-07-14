@@ -1,7 +1,9 @@
 using FIAP.CatalogAPI.Api.Middlewares;
 using FIAP.CatalogAPI.Application.Extensions;
+using FIAP.CatalogAPI.Infrastructure.Data.Context;
 using FIAP.CatalogAPI.Infrastructure.Extensions;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -30,8 +32,10 @@ builder.Services.AddSwaggerGen(options =>
         Scheme = "Bearer",
         BearerFormat = "JWT",
         In = ParameterLocation.Header,
-        Description = "Insira o token JWT obtido em POST /api/auth/login"
+        Description = "Insira o token JWT obtido em POST /api/Auth/login no UsersAPI"
     });
+
+    options.OperationFilter<FIAP.CatalogAPI.Api.Filters.AuthorizeCheckOperationFilter>();
 });
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -48,11 +52,21 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 
 builder.Services.AddAuthorization();
+builder.Services.AddHealthChecks();
 
 builder.Services.AddInfrastructureServices(builder.Configuration);
 builder.Services.AddApplicationServices();
 
 var app = builder.Build();
+
+// Não há migrations no projeto — cria o schema direto a partir do modelo do EF Core
+// se o banco ainda não existir (suficiente para dev local; um projeto com migrations
+// reais trocaria isso por Database.Migrate()).
+using (var scope = app.Services.CreateScope())
+{
+    var dbContext = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+    dbContext.Database.EnsureCreated();
+}
 
 app.UseMiddleware<ExceptionMiddleware>();
 
@@ -66,6 +80,7 @@ app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
+app.MapHealthChecks("/health");
 
 app.Run();
 

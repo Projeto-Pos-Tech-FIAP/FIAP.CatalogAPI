@@ -55,7 +55,9 @@ public class GameController : ControllerBase
         try
         {
             var game = await _gameService.CreateAsync(dto);
-            return CreatedAtAction(nameof(GetByIdAsync), new { id = game.GameId }, game);
+            // "Async" é removido automaticamente do nome da action nas rotas desde o .NET 8 —
+            // nameof(GetByIdAsync) não bate com o nome registrado ("GetById"), por isso o literal aqui.
+            return CreatedAtAction("GetById", new { id = game.GameId }, game);
         }
         catch (NotFoundException ex)
         {
