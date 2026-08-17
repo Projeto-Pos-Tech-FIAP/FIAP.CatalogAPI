@@ -5,6 +5,7 @@ using FIAP.CatalogAPI.Infrastructure.Extensions;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi;
+using Prometheus;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -70,6 +71,8 @@ using (var scope = app.Services.CreateScope())
 
 app.UseMiddleware<ExceptionMiddleware>();
 
+app.UseHttpMetrics();
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -81,6 +84,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 app.MapHealthChecks("/health");
+app.MapMetrics();
 
 app.Run();
 
