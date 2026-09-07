@@ -15,6 +15,7 @@ Microserviço de catálogo de jogos da plataforma FIAP Games. Responsável pelo 
 7. [Deploy — Passo a Passo Completo](#7-deploy--passo-a-passo-completo)
 8. [Executar Localmente com Docker Compose](#8-executar-localmente-com-docker-compose)
 9. [Endpoints da API](#9-endpoints-da-api)
+10. [Persistência Poliglota — MongoDB e Redis](#10-persistência-poliglota--mongodb-e-redis)
 
 ---
 
@@ -67,7 +68,7 @@ FIAP.CatalogAPI/
 │   ├── FIAP.CatalogAPI.Application/     # Serviços, DTOs, mapeamentos
 │   ├── FIAP.CatalogAPI.Infrastructure/  # EF Core, Kafka, MongoDB, Keycloak
 │   ├── FIAP.CatalogAPI.Api/             # Controllers, middlewares, Program.cs
-│   └── FIAP.CatalogAPI.Tests/           # Testes unitários (14 testes)
+│   └── FIAP.CatalogAPI.Tests/           # Testes unitários
 ├── k8s/                                 # Manifestos Kubernetes deste serviço
 │   ├── configmap.yaml                   # Configurações não-sensíveis
 │   ├── secret.yaml                      # Dados sensíveis (connection strings)
@@ -378,6 +379,7 @@ docker-compose down
 | Kafka UI | http://localhost:8090 | — |
 | SQL Server | localhost:1433 | sa / PosTech@123 |
 | MongoDB | localhost:27018 | admin / PosTech@123 |
+| Redis | localhost:6379 | — |
 
 ---
 
@@ -406,4 +408,54 @@ docker-compose down
 |---|---|---|---|---|
 | POST | `/api/purchase` | `{ "gameId": 1 }` | Inicia compra — UserId extraído do JWT | ✅ |
 
+### Event Logs (MongoDB)
+
+| Método | Endpoint | Descrição | Auth |
+|---|---|---|---|
+| GET | `/api/eventlog?correlationId=&eventType=&service=&limit=50` | Lista os eventos mais recentes, com filtros opcionais | ✅ |
+| GET | `/api/eventlog/{correlationId}` | Rastro completo de um fluxo de compra, do mais antigo ao mais recente | ✅ |
+
 > Endpoints marcados com ✅ requerem header `Authorization: Bearer <token>`
+
+---
+
+## 10. Persistência Poliglota — MongoDB e Redis
+
+### MongoDB — logs de eventos e auditoria
+
+| Base / coleção | Conteúdo | Quem escreve |
+|---|---|---|
+| `FcgEvents.EventLogs` | Todo evento Kafka publicado ou consumido | CatalogAPI, PaymentAPI e UsersAPI |
+| `CatalogAudit.AuditLogs` | Auditoria de alterações das entidades relacionais | CatalogAPI (interceptor de `SaveChanges` do EF Core) |
+
+A CatalogAPI registra `OrderPlacedEvent` (publicado) e `PaymentProcessedEvent` (consumido). Como os três serviços gravam na mesma coleção, `GET /api/eventlog/{correlationId}` devolve o fluxo inteiro de uma compra — inclusive o que aconteceu dentro do PaymentAPI. Índices em `{correlationId, occurredAt}` e `{occurredAt}` são criados na subida da aplicação.
+
+Uma falha ao gravar o log **não** derruba o fluxo de negócio: a exceção é capturada e logada — o log é observabilidade, não parte da transação.
+
+### Redis — cache distribuído
+
+Leitura e escrita via `IDistributedCache` (abstração do ASP.NET Core, sobre `AddStackExchangeRedisCache`); a invalidação por prefixo usa o `IConnectionMultiplexer` do StackExchange.Redis, porque varrer chaves (`SCAN`) não existe na abstração.
+
+| O que é cacheado | Chave | Invalidação |
+|---|---|---|
+| `GET /api/game` — listagem completa do catálogo | `catalog:games:all` | TTL 120s + `POST`/`PUT`/`DELETE` em jogo |
+| `GET /api/game/{id}` — detalhe com join de gêneros | `catalog:games:{id}` | TTL 120s + `POST`/`PUT`/`DELETE` em jogo |
+
+**Redis fora do ar não derruba a API** — as operações de cache capturam exceção, logam um *warning* e seguem para o SQL Server; o multiplexer sobe com `AbortOnConnectFail = false` e reconecta em background.
+
+Para ver o cache em ação, chame `GET /api/game` duas vezes e observe `Cache MISS` / `Cache HIT` no log (nível `Debug`, já habilitado em `appsettings.Development.json`):
+
+```bash
+docker exec fiap-redis redis-cli KEYS 'catalog:*'
+```
+
+> O `IDistributedCache` grava cada entrada como **hash** (campos `data`, `absexp`, `sldexp`), não como string — `redis-cli GET` devolve `WRONGTYPE`. Para ver o conteúdo: `redis-cli HGET catalog:games:all data`.
+
+| Variável | Descrição | Exemplo (local) |
+|---|---|---|
+| `ConnectionStrings__Redis` | Endereço do Redis | `localhost:6379` |
+| `Cache__InstanceName` | Prefixo das chaves | `catalog:` |
+| `Cache__DefaultTtlSeconds` | TTL padrão das entradas | `120` |
+| `MongoDb__EventsDatabaseName` / `__EventsCollectionName` | Base e coleção dos logs de eventos | `FcgEvents` / `EventLogs` |
+
+Detalhes da decisão de arquitetura em [`FIAP.Orchestration/README.md` § 12](../FIAP.Orchestration/README.md#12-persistência-poliglota--mongodb-e-redis).
