@@ -1,7 +1,6 @@
 using FIAP.CatalogAPI.Application.Interfaces;
 using FIAP.CatalogAPI.Domain.Entities;
-using FIAP.CatalogAPI.Infrastructure.Options;
-using Microsoft.Extensions.Options;
+using FIAP.CatalogAPI.Infrastructure.Data.Mongo;
 using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
 using MongoDB.Bson.Serialization.IdGenerators;
@@ -28,17 +27,9 @@ public class MongoAuditService : IAuditService
         }
     }
 
-    public MongoAuditService(IOptions<MongoDbSettings> settings)
+    public MongoAuditService(MongoContext context)
     {
-        var config = settings.Value;
-        var clientSettings = new MongoClientSettings
-        {
-            Server = new MongoServerAddress(config.Host, config.Port),
-            Credential = MongoCredential.CreateCredential("admin", config.Username, config.Password)
-        };
-        var client = new MongoClient(clientSettings);
-        var database = client.GetDatabase(config.DatabaseName);
-        _collection = database.GetCollection<AuditLog>(config.CollectionName);
+        _collection = context.GetAuditCollection<AuditLog>();
     }
 
     public async Task SaveAuditLogsAsync(IEnumerable<AuditLog> logs, CancellationToken cancellationToken = default)

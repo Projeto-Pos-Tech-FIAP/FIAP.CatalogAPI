@@ -11,12 +11,18 @@ public class GameService : IGameService
 {
     private readonly IGameRepository _gameRepository;
     private readonly IGenreRepository _genreRepository;
+    private readonly ICacheService _cache;
     private readonly IMapper _mapper;
 
-    public GameService(IGameRepository gameRepository, IGenreRepository genreRepository, IMapper mapper)
+    public GameService(
+        IGameRepository gameRepository,
+        IGenreRepository genreRepository,
+        ICacheService cache,
+        IMapper mapper)
     {
         _gameRepository = gameRepository;
         _genreRepository = genreRepository;
+        _cache = cache;
         _mapper = mapper;
     }
 
@@ -41,21 +47,40 @@ public class GameService : IGameService
         }
 
         var saved = await _gameRepository.AddAsync(game);
+
+        await InvalidateGamesCacheAsync();
+
         return _mapper.Map<GameOutputDto>(saved);
     }
 
+    /// <summary>
+    /// Consulta cacheada no Redis: o detalhe do jogo carrega gêneros por join e é o
+    /// endpoint mais chamado do catálogo.
+    /// </summary>
     public async Task<GameOutputDto> GetByIdAsync(int gameId)
     {
+        var cached = await _cache.GetAsync<GameOutputDto>(CacheKeys.Game(gameId));
+        if (cached is not null) return cached;
+
         var game = await _gameRepository.GetByIdAsync(gameId)
             ?? throw new NotFoundException("Game", gameId);
 
-        return _mapper.Map<GameOutputDto>(game);
+        var dto = _mapper.Map<GameOutputDto>(game);
+        await _cache.SetAsync(CacheKeys.Game(gameId), dto);
+
+        return dto;
     }
 
+    /// <summary>
+    /// Listagem completa do catálogo — a consulta mais cara do serviço e a que menos muda.
+    /// </summary>
     public async Task<List<GameOutputDto>> GetAllAsync()
     {
-        var games = await _gameRepository.GetAllAsync();
-        return _mapper.Map<List<GameOutputDto>>(games);
+        return await _cache.GetOrSetAsync(CacheKeys.AllGames, async () =>
+        {
+            var games = await _gameRepository.GetAllAsync();
+            return _mapper.Map<List<GameOutputDto>>(games);
+        });
     }
 
     public async Task<GameOutputDto> UpdateAsync(int gameId, GameUpdateDto dto)
@@ -76,6 +101,9 @@ public class GameService : IGameService
         }
 
         var updated = await _gameRepository.UpdateAsync(game);
+
+        await InvalidateGamesCacheAsync();
+
         return _mapper.Map<GameOutputDto>(updated);
     }
 
@@ -86,5 +114,11 @@ public class GameService : IGameService
 
         game.Delete();
         await _gameRepository.UpdateAsync(game);
+
+        await InvalidateGamesCacheAsync();
     }
+
+    // Escrita em qualquer jogo derruba lista e detalhes: manter a granularidade fina
+    // custaria mais do que o TTL curto economiza.
+    private Task InvalidateGamesCacheAsync() => _cache.RemoveByPrefixAsync(CacheKeys.GamesPrefix);
 }

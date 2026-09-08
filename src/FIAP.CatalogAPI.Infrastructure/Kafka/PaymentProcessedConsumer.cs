@@ -1,4 +1,5 @@
 using Confluent.Kafka;
+using FIAP.CatalogAPI.Application.Interfaces;
 using DomainEntities = FIAP.CatalogAPI.Domain.Entities;
 using FIAP.CatalogAPI.Domain.Events;
 using FIAP.CatalogAPI.Domain.Interfaces;
@@ -17,16 +18,21 @@ namespace FIAP.CatalogAPI.Infrastructure.Kafka;
 /// </summary>
 public class PaymentProcessedConsumer : BackgroundService
 {
+    private const string ServiceName = "CatalogAPI";
+
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IEventLogService _eventLogService;
     private readonly KafkaSettings _settings;
     private readonly ILogger<PaymentProcessedConsumer> _logger;
 
     public PaymentProcessedConsumer(
         IServiceScopeFactory scopeFactory,
+        IEventLogService eventLogService,
         IOptions<KafkaSettings> settings,
         ILogger<PaymentProcessedConsumer> logger)
     {
         _scopeFactory = scopeFactory;
+        _eventLogService = eventLogService;
         _settings = settings.Value;
         _logger = logger;
     }
@@ -66,11 +72,27 @@ public class PaymentProcessedConsumer : BackgroundService
                 if (@event is null)
                 {
                     _logger.LogWarning("Mensagem inválida recebida no tópico {Topic}", result.Topic);
+
+                    await LogConsumedAsync(result.Topic, result.Message.Key, result.Message.Value,
+                        DomainEntities.EventLogStatus.Failed, "Não foi possível desserializar o payload.", stoppingToken);
+
                     consumer.Commit(result);
                     continue;
                 }
 
-                await ProcessPaymentEventAsync(@event, stoppingToken);
+                try
+                {
+                    await ProcessPaymentEventAsync(@event, stoppingToken);
+
+                    await LogConsumedAsync(result.Topic, @event.CorrelationId, result.Message.Value,
+                        DomainEntities.EventLogStatus.Success, error: null, stoppingToken);
+                }
+                catch (Exception ex)
+                {
+                    await LogConsumedAsync(result.Topic, @event.CorrelationId, result.Message.Value,
+                        DomainEntities.EventLogStatus.Failed, ex.Message, stoppingToken);
+                    throw;
+                }
 
                 consumer.Commit(result);
             }
@@ -93,6 +115,24 @@ public class PaymentProcessedConsumer : BackgroundService
         consumer.Close();
         _logger.LogInformation("PaymentProcessedConsumer encerrado.");
     }
+
+    /// <summary>
+    /// Grava no MongoDB o evento consumido. Junto com o que a CatalogAPI publica e com o
+    /// que a PaymentAPI registra, forma o rastro completo da compra por CorrelationId.
+    /// </summary>
+    private Task LogConsumedAsync(string topic, string? correlationId, string payloadJson, string status, string? error, CancellationToken cancellationToken) =>
+        _eventLogService.LogAsync(new DomainEntities.EventLog
+        {
+            Service = ServiceName,
+            EventType = nameof(PaymentProcessedEvent),
+            Direction = DomainEntities.EventLogDirection.Consumed,
+            Topic = topic,
+            CorrelationId = correlationId,
+            Status = status,
+            Error = error,
+            PayloadJson = payloadJson,
+            OccurredAt = DateTime.UtcNow
+        }, cancellationToken);
 
     private async Task ProcessPaymentEventAsync(PaymentProcessedEvent @event, CancellationToken cancellationToken)
     {

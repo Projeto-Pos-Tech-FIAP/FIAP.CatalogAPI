@@ -1,5 +1,6 @@
 using AutoMapper;
 using FIAP.CatalogAPI.Application.DTOs;
+using FIAP.CatalogAPI.Application.Interfaces;
 using FIAP.CatalogAPI.Application.Mappings;
 using FIAP.CatalogAPI.Application.Services;
 using FIAP.CatalogAPI.Domain.Exceptions;
@@ -14,6 +15,7 @@ public class GameServiceTests
 {
     private readonly Mock<IGameRepository> _gameRepositoryMock;
     private readonly Mock<IGenreRepository> _genreRepositoryMock;
+    private readonly Mock<ICacheService> _cacheServiceMock;
     private readonly IMapper _mapper;
     private readonly GameService _sut;
 
@@ -21,10 +23,81 @@ public class GameServiceTests
     {
         _gameRepositoryMock = new Mock<IGameRepository>();
         _genreRepositoryMock = new Mock<IGenreRepository>();
+        _cacheServiceMock = new Mock<ICacheService>();
+
+        // Cache "sempre miss" por padrão: os testes de negócio continuam exercitando o
+        // repositório. Os testes específicos de cache configuram o retorno que precisam.
+        _cacheServiceMock
+            .Setup(c => c.GetOrSetAsync(
+                It.IsAny<string>(),
+                It.IsAny<Func<Task<List<GameOutputDto>>>>(),
+                It.IsAny<TimeSpan?>(),
+                It.IsAny<CancellationToken>()))
+            .Returns((string _, Func<Task<List<GameOutputDto>>> factory, TimeSpan? _, CancellationToken _) => factory());
 
         _mapper = new MapperConfiguration(cfg => cfg.AddProfile<MappingProfile>()).CreateMapper();
 
-        _sut = new GameService(_gameRepositoryMock.Object, _genreRepositoryMock.Object, _mapper);
+        _sut = new GameService(
+            _gameRepositoryMock.Object,
+            _genreRepositoryMock.Object,
+            _cacheServiceMock.Object,
+            _mapper);
+    }
+
+    [Fact]
+    public async Task GetByIdAsync_ShouldReturnFromCache_WithoutHittingRepository()
+    {
+        var cached = new GameOutputDto { GameId = 7, Title = "Cached Game", BasePrice = 10m };
+
+        _cacheServiceMock
+            .Setup(c => c.GetAsync<GameOutputDto>(CacheKeys.Game(7), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(cached);
+
+        var result = await _sut.GetByIdAsync(7);
+
+        result.Title.Should().Be("Cached Game");
+        _gameRepositoryMock.Verify(r => r.GetByIdAsync(It.IsAny<int>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task GetByIdAsync_ShouldPopulateCache_OnCacheMiss()
+    {
+        var game = GameBuilder.New().WithGameId(3).WithTitle("From Database").Build();
+        _gameRepositoryMock.Setup(r => r.GetByIdAsync(3)).ReturnsAsync(game);
+
+        await _sut.GetByIdAsync(3);
+
+        _cacheServiceMock.Verify(
+            c => c.SetAsync(CacheKeys.Game(3), It.IsAny<GameOutputDto>(), It.IsAny<TimeSpan?>(), It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task UpdateAsync_ShouldInvalidateGamesCache()
+    {
+        var game = GameBuilder.New().WithGameId(1).WithTitle("Old Title").Build();
+        _gameRepositoryMock.Setup(r => r.GetByIdAsync(1)).ReturnsAsync(game);
+        _gameRepositoryMock.Setup(r => r.UpdateAsync(It.IsAny<Domain.Entities.Game>())).ReturnsAsync(game);
+
+        await _sut.UpdateAsync(1, new GameUpdateDto { Title = "New Title", BasePrice = 20m });
+
+        _cacheServiceMock.Verify(
+            c => c.RemoveByPrefixAsync(CacheKeys.GamesPrefix, It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_ShouldInvalidateGamesCache()
+    {
+        var game = GameBuilder.New().WithGameId(1).Build();
+        _gameRepositoryMock.Setup(r => r.GetByIdAsync(1)).ReturnsAsync(game);
+        _gameRepositoryMock.Setup(r => r.UpdateAsync(It.IsAny<Domain.Entities.Game>())).ReturnsAsync(game);
+
+        await _sut.DeleteAsync(1);
+
+        _cacheServiceMock.Verify(
+            c => c.RemoveByPrefixAsync(CacheKeys.GamesPrefix, It.IsAny<CancellationToken>()),
+            Times.Once);
     }
 
     [Fact]

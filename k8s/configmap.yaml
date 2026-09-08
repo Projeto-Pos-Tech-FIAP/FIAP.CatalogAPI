@@ -20,3 +20,11 @@ data:
   MongoDb__Port: "27017"
   MongoDb__DatabaseName: "CatalogAudit"
   MongoDb__CollectionName: "AuditLogs"
+  # Logs de eventos de integração — base/coleção compartilhadas com PaymentAPI e UsersAPI
+  MongoDb__EventsDatabaseName: "FcgEvents"
+  MongoDb__EventsCollectionName: "EventLogs"
+
+  # Redis — cache distribuído
+  ConnectionStrings__Redis: "redis:6379"
+  Cache__InstanceName: "catalog:"
+  Cache__DefaultTtlSeconds: "120"
