@@ -8,5 +8,5 @@ public class CacheSettings
     public string InstanceName { get; set; } = "catalog:";
 
     /// <summary>TTL padrão das entradas de cache, em segundos.</summary>
-    public int DefaultTtlSeconds { get; set; } = 120;
+    public int DefaultTtlSeconds { get; set; } = 600;
 }

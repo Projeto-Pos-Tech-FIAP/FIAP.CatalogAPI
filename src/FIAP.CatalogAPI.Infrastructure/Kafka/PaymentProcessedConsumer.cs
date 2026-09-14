@@ -39,6 +39,8 @@ public class PaymentProcessedConsumer : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await Task.Yield();
+
         _logger.LogInformation("PaymentProcessedConsumer iniciado. Tópico: {Topic}", _settings.TopicPaymentProcessed);
 
         var config = new ConsumerConfig

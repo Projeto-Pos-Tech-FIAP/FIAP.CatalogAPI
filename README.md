@@ -39,8 +39,8 @@ O projeto segue **Clean Architecture** com quatro camadas bem definidas:
 ┌──────────────▼──────────┐   ┌───────────────▼────────────┐
 │   CatalogAPI.Domain     │   │  CatalogAPI.Infrastructure  │
 │   Entities · Events     │   │  EF Core · Repositories     │
-│   Interfaces · Exceptions│  │  MongoDB Audit · Kafka      │
-└─────────────────────────┘   │  Keycloak · BackgroundSvc   │
+│   Interfaces · Exceptions│  │  MongoDB Audit · Redis      │
+└─────────────────────────┘   │  Kafka · Keycloak · BgSvc   │
                               └─────────────────────────────┘
 ```
 
@@ -53,6 +53,7 @@ O projeto segue **Clean Architecture** com quatro camadas bem definidas:
 | AutoMapper | 12.0.1 | Mapeamento Entity ↔ DTO |
 | Confluent.Kafka | 2.x | Producer/Consumer Kafka |
 | MongoDB.Driver | 3.x | Audit logs |
+| Microsoft.Extensions.Caching.StackExchangeRedis | 10.0.9 | Cache distribuído (`IDistributedCache`) |
 | Keycloak | 24.0 | Autenticação JWT |
 | Docker | — | Containerização |
 | Kubernetes | 1.28+ | Orquestração |
@@ -66,7 +67,7 @@ FIAP.CatalogAPI/
 ├── src/
 │   ├── FIAP.CatalogAPI.Domain/          # Entidades, interfaces, eventos, exceções
 │   ├── FIAP.CatalogAPI.Application/     # Serviços, DTOs, mapeamentos
-│   ├── FIAP.CatalogAPI.Infrastructure/  # EF Core, Kafka, MongoDB, Keycloak
+│   ├── FIAP.CatalogAPI.Infrastructure/  # EF Core, Kafka, MongoDB, Redis, Keycloak
 │   ├── FIAP.CatalogAPI.Api/             # Controllers, middlewares, Program.cs
 │   └── FIAP.CatalogAPI.Tests/           # Testes unitários
 ├── k8s/                                 # Manifestos Kubernetes deste serviço
@@ -111,44 +112,46 @@ Cliente → POST /api/purchase
 
 ---
 
+### Consumidor Kafka e a subida da API
+
+Os consumidores são `BackgroundService`, e a primeira instrução do `ExecuteAsync` é `await Task.Yield()`. Ela não é decorativa: `consumer.Consume(stoppingToken)` é uma chamada **bloqueante**, e sem devolver o controle ao host antes do laço o `StartAsync` nunca retorna — o Kestrel não chega a fazer bind e a API sobe sem servidor HTTP.
+
+O sintoma é traiçoeiro porque só aparece quando o tópico **já existe e está vazio**: aí o `Consume` fica esperando mensagem, em vez de lançar `Unknown topic or partition` de imediato e cair no `await Task.Delay` do `catch`, que por acidente devolvia o controle e deixava a aplicação subir. Na prática, quebrava em todo restart posterior ao primeiro evento publicado — o container ficava `Up`, mas `/health` não respondia e o target correspondente aparecia `down` no Prometheus.
+
 ## 4. Autenticação com Keycloak
 
-Todos os endpoints protegidos exigem um **Bearer JWT** emitido pelo Keycloak.
+Todos os endpoints protegidos exigem um **Bearer JWT** emitido pelo Keycloak, realm `TechChallengeFiap`. A CatalogAPI apenas **valida** o token — quem emite é o Keycloak e quem faz o login é a `UsersAPI`. Este serviço não tem `AuthController` nem client secret: precisa somente de `Keycloak__Authority` e `Keycloak__Audience`.
 
-### Configurar o Keycloak (primeira vez)
+| Variável | Valor local (`dotnet run`) | Valor no cluster |
+|---|---|---|
+| `Keycloak__Authority` | `http://localhost:8081/realms/TechChallengeFiap` | `http://keycloak/realms/TechChallengeFiap` |
+| `Keycloak__Audience` | `tech-challenge` | `tech-challenge` |
 
-Acesse `http://localhost:8180` (admin / PosTech@123) e:
+> **O `Authority` precisa bater exatamente com o claim `iss` do token.** O Keycloak monta esse claim a partir do header `Host` da requisição, e clientes HTTP omitem a porta quando ela é a padrão — por isso o valor do cluster vai **sem** `:80`, enquanto o local carrega o `:8081` que o Docker Compose publica. Divergência aqui produz 401 em toda rota protegida, sem indicação da causa.
 
-1. **Criar Realm:** `fiap-games`
-2. **Criar Client:**
-   - Client ID: `catalog-api`
-   - Client authentication: ON
-   - Direct access grants: ON (para grant_type=password)
-   - Valid redirect URIs: `*`
-3. **Copiar o Client Secret** em: Client → Credentials → Secret
-4. **Criar um usuário de teste:**
-   - Username: `testuser`
-   - Password: `Test@123` (em Credentials, desmarcar "Temporary")
+### Preparar o usuário (primeira vez)
+
+O realm é importado com clients e roles, mas **sem usuários**. Crie um em `http://localhost:8081` (admin / admin123) → realm `TechChallengeFiap` → **Users** → **Add user**, depois aba **Credentials** → **Set password** com *Temporary* desmarcado.
+
+O realm exige dois atributos customizados, `DateOfBirth` e `Gender`; sem eles a criação falha com 400. Para as rotas de gerenciamento de usuário da `UsersAPI`, atribua ainda a role `Admin` do client `tech-challenge` em **Role mapping**.
 
 ### Obter token
 
-```bash
-POST http://localhost:8180/realms/fiap-games/protocol/openid-connect/token
-Content-Type: application/x-www-form-urlencoded
-
-client_id=catalog-api&client_secret=SEU_SECRET&grant_type=password&username=testuser&password=Test@123
-```
-
-Ou use o endpoint da própria API:
+Pelo endpoint de login da `UsersAPI` (form-data, não JSON):
 
 ```bash
-POST http://localhost:5001/api/auth/login
-Content-Type: application/x-www-form-urlencoded
-
-Username=testuser&Password=Test@123
+curl -s -X POST http://localhost:5002/api/Auth/login   -F "Username=demo.fase3" -F "Password=Demo@12345"
 ```
 
-O `sub` (subject) do token JWT é usado automaticamente como `UserId` no endpoint de compra.
+Ou direto no Keycloak:
+
+```bash
+curl -s -X POST http://localhost:8081/realms/TechChallengeFiap/protocol/openid-connect/token   -d "client_id=tech-challenge" -d "grant_type=password"   -d "username=demo.fase3" -d "password=Demo@12345" -d "client_secret=<secret>"
+```
+
+O `sub` do token é usado automaticamente como `UserId` no endpoint de compra.
+
+Em ambiente com API Gateway, o login sai pelo Kong (`http://localhost:30080/api/auth/login`) e o token vale para os dois serviços — ver [`FIAP.Orchestration/README.md` § 10](../FIAP.Orchestration/README.md#10-api-gateway-kong).
 
 ---
 
@@ -438,8 +441,8 @@ Leitura e escrita via `IDistributedCache` (abstração do ASP.NET Core, sobre `A
 
 | O que é cacheado | Chave | Invalidação |
 |---|---|---|
-| `GET /api/game` — listagem completa do catálogo | `catalog:games:all` | TTL 120s + `POST`/`PUT`/`DELETE` em jogo |
-| `GET /api/game/{id}` — detalhe com join de gêneros | `catalog:games:{id}` | TTL 120s + `POST`/`PUT`/`DELETE` em jogo |
+| `GET /api/game` — listagem completa do catálogo | `catalog:games:all` | TTL 10 min + `POST`/`PUT`/`DELETE` em jogo |
+| `GET /api/game/{id}` — detalhe com join de gêneros | `catalog:games:{id}` | TTL 10 min + `POST`/`PUT`/`DELETE` em jogo |
 
 **Redis fora do ar não derruba a API** — as operações de cache capturam exceção, logam um *warning* e seguem para o SQL Server; o multiplexer sobe com `AbortOnConnectFail = false` e reconecta em background.
 
@@ -455,7 +458,7 @@ docker exec fiap-redis redis-cli KEYS 'catalog:*'
 |---|---|---|
 | `ConnectionStrings__Redis` | Endereço do Redis | `localhost:6379` |
 | `Cache__InstanceName` | Prefixo das chaves | `catalog:` |
-| `Cache__DefaultTtlSeconds` | TTL padrão das entradas | `120` |
+| `Cache__DefaultTtlSeconds` | TTL padrão das entradas | `600` (10 min) |
 | `MongoDb__EventsDatabaseName` / `__EventsCollectionName` | Base e coleção dos logs de eventos | `FcgEvents` / `EventLogs` |
 
 Detalhes da decisão de arquitetura em [`FIAP.Orchestration/README.md` § 12](../FIAP.Orchestration/README.md#12-persistência-poliglota--mongodb-e-redis).

@@ -27,4 +27,4 @@ data:
   # Redis — cache distribuído
   ConnectionStrings__Redis: "redis:6379"
   Cache__InstanceName: "catalog:"
-  Cache__DefaultTtlSeconds: "120"
+  Cache__DefaultTtlSeconds: "600"
