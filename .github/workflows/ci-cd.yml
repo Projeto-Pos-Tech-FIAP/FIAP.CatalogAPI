@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   pipeline:
-    uses: Projeto-Pos-Tech-FIAP/FIAP.Orchestration/.github/workflows/dotnet-service.yml@feat/ci-cd-github-actions
+    uses: Projeto-Pos-Tech-FIAP/FIAP.Orchestration/.github/workflows/dotnet-service.yml@main
     with:
       solution: FIAP.CatalogAPI.slnx
       service-name: catalog-api
