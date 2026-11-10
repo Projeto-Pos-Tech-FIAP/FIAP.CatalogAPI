@@ -6,7 +6,7 @@ services:
     container_name: catalog-sqlserver
     environment:
       ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: "PosTech@123"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:?defina no .env}"
     ports:
       - "1433:1433"
     volumes:
@@ -16,8 +16,8 @@ services:
     image: mongo:7
     container_name: catalog-mongodb
     environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: "PosTech@123"
+      MONGO_INITDB_ROOT_USERNAME: "${MONGO_INITDB_ROOT_USERNAME:?defina no .env}"
+      MONGO_INITDB_ROOT_PASSWORD: "${MONGO_INITDB_ROOT_PASSWORD:?defina no .env}"
     ports:
       - "27018:27017"
     volumes:
