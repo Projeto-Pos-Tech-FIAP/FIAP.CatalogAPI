@@ -9,6 +9,9 @@ using FIAP.CatalogAPI.Infrastructure.Data.Repositories;
 using FIAP.CatalogAPI.Infrastructure.Data.Services;
 using FIAP.CatalogAPI.Infrastructure.Kafka;
 using FIAP.CatalogAPI.Infrastructure.Options;
+using FIAP.CatalogAPI.Infrastructure.Search;
+using Elastic.Clients.Elasticsearch;
+using Elastic.Transport;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -33,6 +36,7 @@ public static class InfrastructureServiceExtensions
 
         services.AddMongoDb(configuration);
         services.AddRedisCache(configuration);
+        services.AddElasticsearch(configuration);
 
         // Kafka
         services.Configure<KafkaSettings>(options =>
@@ -61,6 +65,50 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<IEventLogService, MongoEventLogService>();
 
         return services;
+    }
+
+    /// <summary>
+    /// Busca avançada em Elasticsearch. O endereço e as credenciais vêm de configuração,
+    /// então a mesma imagem serve para o cluster local, para o serviço no Kubernetes e
+    /// para um endpoint gerenciado (Elastic Cloud / Amazon OpenSearch).
+    /// </summary>
+    private static IServiceCollection AddElasticsearch(this IServiceCollection services, IConfiguration configuration)
+    {
+        services.Configure<ElasticsearchSettings>(options =>
+            configuration.GetSection(ElasticsearchSettings.SectionName).Bind(options));
+
+        var settings = configuration.GetSection(ElasticsearchSettings.SectionName).Get<ElasticsearchSettings>()
+            ?? new ElasticsearchSettings();
+
+        // Singleton: o ElasticsearchClient é thread-safe e mantém o próprio pool de conexões
+        // — instanciá-lo por requisição esgotaria sockets.
+        services.AddSingleton(_ => BuildClient(settings));
+
+        services.AddSingleton<IGameSearchService, ElasticGameSearchService>();
+        services.AddHostedService<SearchIndexInitializer>();
+
+        return services;
+    }
+
+    private static ElasticsearchClient BuildClient(ElasticsearchSettings settings)
+    {
+        var clientSettings = new ElasticsearchClientSettings(new Uri(settings.Uri))
+            .DefaultIndex(settings.GamesIndex)
+            // Timeout curto: a busca é um caminho de leitura do usuário, não pode ficar
+            // pendurada esperando um cluster fora do ar.
+            .RequestTimeout(TimeSpan.FromSeconds(settings.RequestTimeoutSeconds));
+
+        // API Key tem precedência: é o formato usado pelo Elastic Cloud.
+        if (!string.IsNullOrWhiteSpace(settings.ApiKey))
+            clientSettings = clientSettings.Authentication(new ApiKey(settings.ApiKey));
+        else if (!string.IsNullOrWhiteSpace(settings.Username))
+            clientSettings = clientSettings.Authentication(
+                new BasicAuthentication(settings.Username, settings.Password ?? string.Empty));
+
+        if (settings.AllowInvalidCertificate)
+            clientSettings = clientSettings.ServerCertificateValidationCallback((_, _, _, _) => true);
+
+        return new ElasticsearchClient(clientSettings);
     }
 
     /// <summary>

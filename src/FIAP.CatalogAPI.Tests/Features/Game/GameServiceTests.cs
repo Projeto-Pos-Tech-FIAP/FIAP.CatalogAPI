@@ -7,6 +7,7 @@ using FIAP.CatalogAPI.Domain.Exceptions;
 using FIAP.CatalogAPI.Domain.Interfaces;
 using FIAP.CatalogAPI.Tests.Builders;
 using FluentAssertions;
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 
 namespace FIAP.CatalogAPI.Tests.Features.Game;
@@ -16,6 +17,7 @@ public class GameServiceTests
     private readonly Mock<IGameRepository> _gameRepositoryMock;
     private readonly Mock<IGenreRepository> _genreRepositoryMock;
     private readonly Mock<ICacheService> _cacheServiceMock;
+    private readonly Mock<IGameSearchService> _searchServiceMock;
     private readonly IMapper _mapper;
     private readonly GameService _sut;
 
@@ -24,6 +26,7 @@ public class GameServiceTests
         _gameRepositoryMock = new Mock<IGameRepository>();
         _genreRepositoryMock = new Mock<IGenreRepository>();
         _cacheServiceMock = new Mock<ICacheService>();
+        _searchServiceMock = new Mock<IGameSearchService>();
 
         // Cache "sempre miss" por padrão: os testes de negócio continuam exercitando o
         // repositório. Os testes específicos de cache configuram o retorno que precisam.
@@ -41,7 +44,9 @@ public class GameServiceTests
             _gameRepositoryMock.Object,
             _genreRepositoryMock.Object,
             _cacheServiceMock.Object,
-            _mapper);
+            _searchServiceMock.Object,
+            _mapper,
+            NullLogger<GameService>.Instance);
     }
 
     [Fact]
@@ -229,5 +234,136 @@ public class GameServiceTests
         var act = async () => await _sut.DeleteAsync(99);
 
         await act.Should().ThrowAsync<NotFoundException>();
+    }
+
+    // ─── Sincronização com o índice de busca ───────────────────────────────────
+
+    [Fact]
+    public async Task CreateAsync_ShouldIndexGameInSearchEngine()
+    {
+        var game = GameBuilder.New().WithGameId(42).WithTitle("Indexed Game").Build();
+
+        _gameRepositoryMock.Setup(r => r.AddAsync(It.IsAny<Domain.Entities.Game>())).ReturnsAsync(game);
+        _gameRepositoryMock.Setup(r => r.GetByIdAsync(42)).ReturnsAsync(game);
+
+        await _sut.CreateAsync(new GameInputDto { Title = "Indexed Game", BasePrice = 10m });
+
+        _searchServiceMock.Verify(
+            s => s.IndexAsync(
+                It.Is<Domain.Entities.Game>(g => g.GameId == 42),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task UpdateAsync_ShouldReindexGameInSearchEngine()
+    {
+        var game = GameBuilder.New().WithGameId(7).WithTitle("Old Title").Build();
+
+        _gameRepositoryMock.Setup(r => r.GetByIdAsync(7)).ReturnsAsync(game);
+        _gameRepositoryMock.Setup(r => r.UpdateAsync(It.IsAny<Domain.Entities.Game>())).ReturnsAsync(game);
+
+        await _sut.UpdateAsync(7, new GameUpdateDto { Title = "New Title", BasePrice = 20m });
+
+        _searchServiceMock.Verify(
+            s => s.IndexAsync(
+                It.Is<Domain.Entities.Game>(g => g.GameId == 7),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_ShouldRemoveGameFromSearchIndex()
+    {
+        var game = GameBuilder.New().WithGameId(9).Build();
+
+        _gameRepositoryMock.Setup(r => r.GetByIdAsync(9)).ReturnsAsync(game);
+        _gameRepositoryMock.Setup(r => r.UpdateAsync(It.IsAny<Domain.Entities.Game>())).ReturnsAsync(game);
+
+        await _sut.DeleteAsync(9);
+
+        _searchServiceMock.Verify(s => s.DeleteAsync(9, It.IsAny<CancellationToken>()), Times.Once);
+        _searchServiceMock.Verify(
+            s => s.IndexAsync(It.IsAny<Domain.Entities.Game>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task CreateAsync_ShouldNotFail_WhenSearchIndexingThrows()
+    {
+        var game = GameBuilder.New().WithGameId(11).WithTitle("Any").Build();
+
+        _gameRepositoryMock.Setup(r => r.AddAsync(It.IsAny<Domain.Entities.Game>())).ReturnsAsync(game);
+        _gameRepositoryMock.Setup(r => r.GetByIdAsync(11)).ReturnsAsync(game);
+        _searchServiceMock
+            .Setup(s => s.IndexAsync(It.IsAny<Domain.Entities.Game>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new SearchUnavailableException("cluster fora"));
+
+        // A gravação no banco principal já foi confirmada: devolver erro aqui faria o
+        // cliente acreditar que o jogo não foi criado. O índice é reconciliado pelo reindex.
+        var result = await _sut.CreateAsync(new GameInputDto { Title = "Any", BasePrice = 1m });
+
+        result.Title.Should().Be("Any");
+        _gameRepositoryMock.Verify(r => r.AddAsync(It.IsAny<Domain.Entities.Game>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_ShouldNotFail_WhenRemovingFromIndexThrows()
+    {
+        var game = GameBuilder.New().WithGameId(13).Build();
+
+        _gameRepositoryMock.Setup(r => r.GetByIdAsync(13)).ReturnsAsync(game);
+        _gameRepositoryMock.Setup(r => r.UpdateAsync(It.IsAny<Domain.Entities.Game>())).ReturnsAsync(game);
+        _searchServiceMock
+            .Setup(s => s.DeleteAsync(13, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new SearchUnavailableException("cluster fora"));
+
+        await _sut.DeleteAsync(13);
+
+        game.IsDeleted.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task SearchAsync_ShouldDelegateToSearchEngine_WithoutTouchingRepository()
+    {
+        var query = new GameSearchQueryDto { Q = "wticher" };
+        var expected = new GameSearchResponseDto
+        {
+            Query = "wticher",
+            Total = 1,
+            Items = [new GameSearchHitDto { GameId = 1, Title = "The Witcher 3", Score = 8.4 }]
+        };
+
+        _searchServiceMock
+            .Setup(s => s.SearchAsync(query, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(expected);
+
+        var result = await _sut.SearchAsync(query);
+
+        result.Items.Should().ContainSingle().Which.Title.Should().Be("The Witcher 3");
+        _gameRepositoryMock.Verify(r => r.GetAllAsync(), Times.Never);
+        _cacheServiceMock.Verify(
+            c => c.GetAsync<GameOutputDto>(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task ReindexSearchAsync_ShouldSendAllGamesFromRepository()
+    {
+        var games = new List<Domain.Entities.Game>
+        {
+            GameBuilder.New().WithGameId(1).Build(),
+            GameBuilder.New().WithGameId(2).Build()
+        };
+
+        _gameRepositoryMock.Setup(r => r.GetAllAsync()).ReturnsAsync(games);
+        _searchServiceMock
+            .Setup(s => s.ReindexAllAsync(games, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(2);
+
+        var indexed = await _sut.ReindexSearchAsync();
+
+        indexed.Should().Be(2);
+        _searchServiceMock.Verify(s => s.ReindexAllAsync(games, It.IsAny<CancellationToken>()), Times.Once);
     }
 }

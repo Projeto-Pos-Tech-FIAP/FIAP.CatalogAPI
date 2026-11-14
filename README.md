@@ -1,6 +1,6 @@
 # FIAP.CatalogAPI
 
-Microserviço de catálogo de jogos da plataforma FIAP Games. Responsável pelo CRUD de jogos e pelo fluxo de compra via Apache Kafka, com autenticação via Keycloak.
+Microserviço de catálogo de jogos da plataforma FIAP Games. Responsável pelo CRUD de jogos, pela busca avançada em Elasticsearch e pelo fluxo de compra via Apache Kafka, com autenticação via Keycloak.
 
 ---
 
@@ -16,6 +16,7 @@ Microserviço de catálogo de jogos da plataforma FIAP Games. Responsável pelo 
 8. [Executar Localmente com Docker Compose](#8-executar-localmente-com-docker-compose)
 9. [Endpoints da API](#9-endpoints-da-api)
 10. [Persistência Poliglota — MongoDB e Redis](#10-persistência-poliglota--mongodb-e-redis)
+11. [Busca Avançada — Elasticsearch](#11-busca-avançada--elasticsearch)
 
 ---
 
@@ -54,6 +55,7 @@ O projeto segue **Clean Architecture** com quatro camadas bem definidas:
 | Confluent.Kafka | 2.x | Producer/Consumer Kafka |
 | MongoDB.Driver | 3.x | Audit logs |
 | Microsoft.Extensions.Caching.StackExchangeRedis | 10.0.9 | Cache distribuído (`IDistributedCache`) |
+| Elastic.Clients.Elasticsearch | 8.19 | Busca avançada (fuzzy + relevância) |
 | Keycloak | 24.0 | Autenticação JWT |
 | Docker | — | Containerização |
 | Kubernetes | 1.28+ | Orquestração |
@@ -179,7 +181,10 @@ ASPNETCORE_ENVIRONMENT: "Production"
 ConnectionStrings__DefaultConnection
 MongoDb__Username
 MongoDb__Password
+Elasticsearch__ApiKey        # opcional
 ```
+
+`Elasticsearch__ApiKey` só é necessária ao apontar `Elasticsearch__Uri` para um endpoint gerenciado (Elastic Cloud / Amazon OpenSearch) — o cluster local e o do Kubernetes sobem com `xpack.security.enabled=false`, sem credencial. Também aceita `Elasticsearch__Username` / `Elasticsearch__Password` no lugar da API key.
 
 Para rodar com `dotnet run`, os mesmos valores ficam em User Secrets, fora do repositório:
 ```powershell
@@ -391,6 +396,7 @@ docker-compose down
 | SQL Server | localhost:1433 | `sa` / definida no `.env` |
 | MongoDB | localhost:27018 | definidas no `.env` |
 | Redis | localhost:6379 | — |
+| Elasticsearch | http://localhost:9200 | — |
 
 ---
 
@@ -412,6 +418,13 @@ docker-compose down
 | POST | `/api/game` | Cria novo jogo | ✅ |
 | PUT | `/api/game/{id}` | Atualiza jogo | ✅ |
 | DELETE | `/api/game/{id}` | Remove jogo (soft delete) | ✅ |
+
+### Search (Elasticsearch)
+
+| Método | Endpoint | Descrição | Auth |
+|---|---|---|---|
+| GET | `/api/search?q=&genre=&minPrice=&maxPrice=&onlyActive=&page=&pageSize=` | Busca fuzzy ordenada por relevância | ❌ |
+| POST | `/api/search/reindex` | Recarrega o índice a partir do SQL Server | ✅ |
 
 ### Purchase
 
@@ -470,3 +483,146 @@ docker exec fiap-redis redis-cli KEYS 'catalog:*'
 | `MongoDb__EventsDatabaseName` / `__EventsCollectionName` | Base e coleção dos logs de eventos | `FcgEvents` / `EventLogs` |
 
 Detalhes da decisão de arquitetura em [`FIAP.Orchestration/README.md` § 12](../FIAP.Orchestration/README.md#12-persistência-poliglota--mongodb-e-redis).
+
+---
+
+## 11. Busca Avançada — Elasticsearch
+
+O motor de busca é **independente da consulta relacional**: `GET /api/search` lê do índice no Elasticsearch, não do SQL Server. É o que permite tolerância a erros de digitação e ordenação por relevância — nenhum dos dois é possível com `LIKE '%termo%'`.
+
+### Endpoint
+
+```bash
+# Fuzzy: "wticher" (letras trocadas) encontra "The Witcher 3"
+curl "http://localhost:5001/api/search?q=wticher"
+
+# Filtros combinados — recortam o resultado sem interferir no score
+curl "http://localhost:5001/api/search?q=rpg&genre=RPG&minPrice=50&maxPrice=200&pageSize=5"
+
+# Sem termo: catálogo inteiro em ordem alfabética
+curl "http://localhost:5001/api/search"
+```
+
+Resposta:
+
+```json
+{
+  "query": "wticher",
+  "total": 2,
+  "page": 1,
+  "pageSize": 20,
+  "tookMs": 4,
+  "items": [
+    { "gameId": 1, "title": "The Witcher 3", "basePrice": 99.90, "genres": ["RPG"], "score": 9.12 },
+    { "gameId": 2, "title": "The Witcher 2", "basePrice": 49.90, "genres": ["RPG"], "score": 5.31 }
+  ]
+}
+```
+
+O campo `score` é a relevância calculada pelo Elasticsearch e define a ordem dos resultados — é o que se mostra na demonstração para provar que a ordenação não é alfabética nem por id.
+
+### Como a relevância é montada
+
+A consulta é um `bool` com três partes, cada uma com um papel distinto:
+
+| Cláusula | Conteúdo | Por que |
+|---|---|---|
+| `must` | `multi_match` com `fuzziness: AUTO` sobre `title^4`, `genres^2`, `developer^2`, `publisher^1.5`, `description` | Casa o termo e **produz o score**. O título pesa 4× porque é o que o usuário digita; a descrição só desempata |
+| `should` | `match_phrase` em `title` com `boost: 6` | Empurra o acerto **exato** para cima do acerto aproximado — quem digitou certo vem primeiro |
+| `filter` | `isActive`, `genres.keyword`, `range` em `basePrice` | Recorta o resultado **sem pontuar** (filtros não entram no score) e é cacheável pelo próprio Elasticsearch |
+
+`fuzziness: AUTO` escala a distância de Levenshtein pelo tamanho do termo — 1 edição em palavras curtas, 2 nas longas — e `fuzzy_transpositions` cobre letras adjacentes trocadas (`Clal of Duty` → `Call of Duty`) com uma única edição.
+
+### Mapping do índice
+
+O índice `games` é criado pela própria aplicação, com mapping explícito. Sem ele o Elasticsearch inferiria os tipos no primeiro documento e os campos de texto ficariam sem o analisador do catálogo:
+
+| Campo | Tipo | Observação |
+|---|---|---|
+| `title` | `text` + `title.keyword` | O subcampo `keyword` é o que permite ordenar alfabeticamente (texto analisado não é ordenável) |
+| `genres` | `text` + `genres.keyword` | O subcampo `keyword` atende o filtro por gênero, que é match exato |
+| `description`, `developer`, `publisher` | `text` | Analisador do catálogo |
+| `basePrice` | `double` | Filtro de faixa de preço |
+| `isActive` | `boolean` | Filtro padrão da busca |
+| `releaseDate` | `date` | — |
+
+O analisador `catalog_analyzer` é `standard` + `lowercase` + `asciifolding`: "fifa" casa com "FIFA" e "sao paulo" com "São Paulo" — acento não é erro de digitação, então não deve consumir distância de edição do fuzzy.
+
+### Sincronização com o banco principal
+
+A indexação acontece no `GameService`, logo após a escrita no SQL Server:
+
+| Operação | Efeito no índice |
+|---|---|
+| `POST /api/game` | Reindexa o jogo (relê a entidade para trazer os **nomes** dos gêneros, já que o relacionamento gravado só tem ids) |
+| `PUT /api/game/{id}` | Reindexa o jogo |
+| `DELETE /api/game/{id}` | Remove do índice — a busca não devolve o que a API já considera removido |
+
+As escritas usam `refresh=true`, então o jogo recém-criado já aparece na busca seguinte (sem isso, só depois do refresh periódico de 1s). O volume de escrita do catálogo é baixo, então o custo é irrelevante e o comportamento fica previsível na demonstração.
+
+**Falha ao indexar não derruba a escrita.** A gravação no banco principal já aconteceu; derrubar a requisição ali perderia a escrita. A exceção é logada e o índice é reconciliado depois:
+
+```bash
+# Carga inicial (catálogo que já existia antes do Elasticsearch entrar)
+# e reconciliação após indisponibilidade do cluster
+curl -X POST http://localhost:5001/api/search/reindex -H "Authorization: Bearer $TOKEN"
+# → { "indexed": 12, "message": "12 jogo(s) reindexado(s)." }
+```
+
+O reindex deixa o índice **igual** ao banco, em três passos:
+
+1. **Verifica o índice ignorando o cache.** O processo guarda em memória que o índice já está pronto, para não pagar um `HEAD` em cada escrita. Se o índice tiver sido perdido depois disso (cluster recriado, índice apagado, PVC limpo), confiar nesse cache faria o `_bulk` seguinte criar o índice por **mapping dinâmico** — sem o `catalog_analyzer`, com `basePrice` como `float` e `gameId` como `long`. O reindex é o caminho explícito de reconciliação, então reverifica.
+2. **Grava todos os jogos em um único `_bulk`.**
+3. **Apaga os órfãos** com `_delete_by_query` (`must_not` nos ids que ainda existem). Sem este passo o `_bulk` só sobrescreveria os ids vivos, e um jogo deletado enquanto o cluster estava fora sobreviveria no índice como fantasma, voltando nas buscas.
+
+### Comportamento com o cluster fora do ar
+
+Diferente do cache, a busca **não** tem equivalente no banco relacional — fuzzy e score não existem em SQL. Então o endpoint falha explicitamente em vez de devolver silenciosamente um resultado pior:
+
+| Situação | Resposta |
+|---|---|
+| Cluster indisponível | `503` — `Busca indisponível — cluster inalcançável: Connection refused (...)` |
+| Elasticsearch recusa a consulta | `503` — `Busca indisponível — Elasticsearch respondeu HTTP 4xx/5xx: ...` |
+| Índice ainda não criado | `200` com `total: 0` e um *warning* no log pedindo o reindex |
+| Falha ao indexar em `POST`/`PUT`/`DELETE` | A escrita no SQL Server é mantida (`201`/`200`/`204`); erro no log dizendo qual jogo ficou de fora e para rodar o reindex |
+
+As mensagens distinguem **cluster inalcançável** (falha de transporte, sem status HTTP) de **Elasticsearch recusou** (respondeu com status) — é o que diz ao operador se o problema é de rede ou de requisição. E o log da falha de escrita nomeia o jogo e a ação:
+
+```
+fail: Jogo 8 gravado no banco mas não indexado (cluster inalcançável: Connection refused (localhost:9200)).
+      Rode POST /api/search/reindex.
+```
+
+O índice é criado no start da aplicação por um `BackgroundService` com retry (10 tentativas, 5s de intervalo), porque em Kubernetes e no docker-compose a API quase sempre sobe antes do Elasticsearch ficar pronto — e isso não pode impedir a API de atender.
+
+### Configuração
+
+Nada é hardcoded: a mesma imagem serve para o cluster local, para o serviço no Kubernetes e para um endpoint gerenciado (**Elastic Cloud** ou **Amazon OpenSearch**) — basta trocar as variáveis.
+
+| Variável | Descrição | Exemplo (local) |
+|---|---|---|
+| `Elasticsearch__Uri` | Endereço do cluster | `http://localhost:9200` |
+| `Elasticsearch__GamesIndex` | Nome do índice | `games` |
+| `Elasticsearch__Fuzziness` | Distância de edição do fuzzy | `AUTO` |
+| `Elasticsearch__RequestTimeoutSeconds` | Timeout das requisições | `10` |
+| `Elasticsearch__ApiKey` | API Key do Elastic Cloud (**Secret**) | — |
+| `Elasticsearch__Username` / `__Password` | Autenticação básica (**Secret**) | — |
+| `Elasticsearch__AllowInvalidCertificate` | Aceita certificado self-signed | `false` |
+
+A `ApiKey` tem precedência sobre usuário/senha. Credencial nenhuma vive em código ou YAML versionado: `Uri`, `GamesIndex`, `Fuzziness` e `RequestTimeoutSeconds` ficam no ConfigMap; `ApiKey`, `Username` e `Password` entram pela Secret da API.
+
+### Inspecionar o índice
+
+```bash
+# Saúde do cluster
+curl http://localhost:9200/_cluster/health?pretty
+
+# Mapping efetivamente aplicado
+curl http://localhost:9200/games/_mapping?pretty
+
+# Quantos documentos estão indexados
+curl http://localhost:9200/games/_count?pretty
+
+# Ver o score de cada hit direto no Elasticsearch
+curl "http://localhost:9200/games/_search?q=title:wticher~&pretty"
+```
