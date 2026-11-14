@@ -28,3 +28,9 @@ data:
   ConnectionStrings__Redis: "redis:6379"
   Cache__InstanceName: "catalog:"
   Cache__DefaultTtlSeconds: "600"
+
+  # Elasticsearch — busca avançada (fuzzy + relevância)
+  Elasticsearch__Uri: "http://elasticsearch:9200"
+  Elasticsearch__GamesIndex: "games"
+  Elasticsearch__RequestTimeoutSeconds: "10"
+  Elasticsearch__Fuzziness: "AUTO"

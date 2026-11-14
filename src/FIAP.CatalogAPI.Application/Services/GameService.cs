@@ -4,6 +4,7 @@ using FIAP.CatalogAPI.Application.Interfaces;
 using FIAP.CatalogAPI.Domain.Entities;
 using FIAP.CatalogAPI.Domain.Exceptions;
 using FIAP.CatalogAPI.Domain.Interfaces;
+using Microsoft.Extensions.Logging;
 
 namespace FIAP.CatalogAPI.Application.Services;
 
@@ -12,18 +13,24 @@ public class GameService : IGameService
     private readonly IGameRepository _gameRepository;
     private readonly IGenreRepository _genreRepository;
     private readonly ICacheService _cache;
+    private readonly IGameSearchService _search;
     private readonly IMapper _mapper;
+    private readonly ILogger<GameService> _logger;
 
     public GameService(
         IGameRepository gameRepository,
         IGenreRepository genreRepository,
         ICacheService cache,
-        IMapper mapper)
+        IGameSearchService search,
+        IMapper mapper,
+        ILogger<GameService> logger)
     {
         _gameRepository = gameRepository;
         _genreRepository = genreRepository;
         _cache = cache;
+        _search = search;
         _mapper = mapper;
+        _logger = logger;
     }
 
     public async Task<GameOutputDto> CreateAsync(GameInputDto dto)
@@ -49,6 +56,7 @@ public class GameService : IGameService
         var saved = await _gameRepository.AddAsync(game);
 
         await InvalidateGamesCacheAsync();
+        await SyncSearchIndexAsync(saved.GameId);
 
         return _mapper.Map<GameOutputDto>(saved);
     }
@@ -103,6 +111,7 @@ public class GameService : IGameService
         var updated = await _gameRepository.UpdateAsync(game);
 
         await InvalidateGamesCacheAsync();
+        await SyncSearchIndexAsync(updated.GameId);
 
         return _mapper.Map<GameOutputDto>(updated);
     }
@@ -116,6 +125,56 @@ public class GameService : IGameService
         await _gameRepository.UpdateAsync(game);
 
         await InvalidateGamesCacheAsync();
+
+        // Jogo com soft delete sai do índice: a busca não deve devolver o que a API
+        // já considera removido.
+        try
+        {
+            await _search.DeleteAsync(gameId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Jogo {GameId} removido do banco mas não do índice de busca. "
+                + "Rode POST /api/search/reindex.", gameId);
+        }
+    }
+
+    public Task<GameSearchResponseDto> SearchAsync(
+        GameSearchQueryDto query,
+        CancellationToken cancellationToken = default)
+        => _search.SearchAsync(query, cancellationToken);
+
+    public async Task<int> ReindexSearchAsync(CancellationToken cancellationToken = default)
+    {
+        // Lê direto do repositório (e não de GetAllAsync) porque a indexação precisa das
+        // entidades com os gêneros carregados, não do DTO de saída.
+        var games = await _gameRepository.GetAllAsync();
+        return await _search.ReindexAllAsync(games, cancellationToken);
+    }
+
+    /// <summary>
+    /// Reindexa o jogo depois da escrita no banco principal. Relê a entidade para que o
+    /// documento carregue os nomes dos gêneros — em um create/update o relacionamento
+    /// gravado só tem os ids.
+    /// </summary>
+    private async Task SyncSearchIndexAsync(int gameId)
+    {
+        // A escrita no banco principal já foi confirmada. Propagar uma falha de indexação
+        // daqui devolveria erro ao cliente para uma operação que, de fato, deu certo —
+        // e o jogo ficaria criado sem que ninguém soubesse. O índice é reconciliado por
+        // POST /api/search/reindex.
+        try
+        {
+            var persisted = await _gameRepository.GetByIdAsync(gameId);
+            if (persisted is null) return;
+
+            await _search.IndexAsync(persisted);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Jogo {GameId} gravado no banco mas não indexado. "
+                + "Rode POST /api/search/reindex.", gameId);
+        }
     }
 
     // Escrita em qualquer jogo derruba lista e detalhes: manter a granularidade fina

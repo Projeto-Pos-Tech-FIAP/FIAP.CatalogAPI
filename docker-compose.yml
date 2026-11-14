@@ -31,6 +31,27 @@ services:
     volumes:
       - redis_data:/data
 
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.5
+    container_name: catalog-elasticsearch
+    environment:
+      # Single-node: sem eleição de master e sem réplicas, que é o que faz sentido em dev.
+      discovery.type: single-node
+      # Security desligada só no ambiente local — em produção as credenciais entram por
+      # Secret (Elasticsearch__Username / Elasticsearch__Password ou Elasticsearch__ApiKey).
+      xpack.security.enabled: "false"
+      # Sem limite de heap o container do ES come alguns GB de RAM na máquina de dev.
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   # ─── Kafka ───────────────────────────────────────────────────────────────────
   # Zookeeper: coordenador de cluster necessário para o Kafka (modo KRaft não usado aqui)
   zookeeper:
@@ -82,6 +103,7 @@ services:
 
 volumes:
   sqlserver_data:
+  elasticsearch_data:
   mongo_data:
   redis_data:
   kafka_data:

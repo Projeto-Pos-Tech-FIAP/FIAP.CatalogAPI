@@ -9,4 +9,17 @@ public interface IGameService
     Task<List<GameOutputDto>> GetAllAsync();
     Task<GameOutputDto> UpdateAsync(int gameId, GameUpdateDto dto);
     Task DeleteAsync(int gameId);
+
+    /// <summary>
+    /// Busca avançada no Elasticsearch: tolerante a erros de digitação e ordenada por
+    /// relevância. Não passa pelo banco relacional.
+    /// </summary>
+    Task<GameSearchResponseDto> SearchAsync(GameSearchQueryDto query, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Recarrega o índice de busca a partir do banco relacional (carga inicial e
+    /// reconciliação após indisponibilidade do cluster).
+    /// </summary>
+    /// <returns>Quantidade de jogos indexados.</returns>
+    Task<int> ReindexSearchAsync(CancellationToken cancellationToken = default);
 }
