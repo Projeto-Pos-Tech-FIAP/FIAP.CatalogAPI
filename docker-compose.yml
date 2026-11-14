@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
@@ -62,6 +60,14 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      # O ZooKeeper reconstrói o estado com snapshot + transaction log. Sem persistir
+      # /var/lib/zookeeper/log ele volta vazio a cada recriação do container, perde o
+      # znode /cluster/id e gera um cluster novo — enquanto o Kafka, que TEM volume,
+      # mantém o clusterId antigo no meta.properties. O broker então morre no start com
+      # InconsistentClusterIdException. Os dois precisam persistir ou nenhum.
+      - zookeeper_log:/var/lib/zookeeper/log
 
   kafka:
     image: confluentinc/cp-kafka:7.6.1
@@ -106,4 +112,6 @@ volumes:
   elasticsearch_data:
   mongo_data:
   redis_data:
+  zookeeper_data:
+  zookeeper_log:
   kafka_data:
