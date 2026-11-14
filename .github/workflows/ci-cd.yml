@@ -20,6 +20,10 @@ permissions:
   packages: write
   security-events: write
   actions: read
+  # Troca do token do GitHub por um do Azure (OIDC) para publicar no ACR.
+  # Workflow reutilizável herda as permissões de quem chama, então precisa
+  # estar concedida aqui.
+  id-token: write
 
 jobs:
   pipeline:
