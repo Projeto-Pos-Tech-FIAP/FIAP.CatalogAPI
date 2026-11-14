@@ -72,7 +72,6 @@ FIAP.CatalogAPI/
 │   └── FIAP.CatalogAPI.Tests/           # Testes unitários
 ├── k8s/                                 # Manifestos Kubernetes deste serviço
 │   ├── configmap.yaml                   # Configurações não-sensíveis
-│   ├── secret.yaml                      # Dados sensíveis (connection strings)
 │   ├── deployment.yaml                  # Deployment com 2 réplicas
 │   └── service.yaml                     # ClusterIP Service
 ├── Dockerfile                           # Multi-stage build
@@ -131,7 +130,7 @@ Todos os endpoints protegidos exigem um **Bearer JWT** emitido pelo Keycloak, re
 
 ### Preparar o usuário (primeira vez)
 
-O realm é importado com clients e roles, mas **sem usuários**. Crie um em `http://localhost:8081` (admin / admin123) → realm `TechChallengeFiap` → **Users** → **Add user**, depois aba **Credentials** → **Set password** com *Temporary* desmarcado.
+O realm é importado com clients e roles, mas **sem usuários**. Crie um em `http://localhost:8081` (usuário e senha de admin definidos no `.env` do `FIAP.Orchestration`) → realm `TechChallengeFiap` → **Users** → **Add user**, depois aba **Credentials** → **Set password** com *Temporary* desmarcado.
 
 O realm exige dois atributos customizados, `DateOfBirth` e `Gender`; sem eles a criação falha com 400. Para as rotas de gerenciamento de usuário da `UsersAPI`, atribua ainda a role `Admin` do client `tech-challenge` em **Role mapping**.
 
@@ -163,7 +162,7 @@ Em ambiente com API Gateway, o login sai pelo Kong (`http://localhost:30080/api/
 | Uso de **Deployment** para gerenciar Pods | ✅ | `k8s/deployment.yaml` — `kind: Deployment`, 2 réplicas |
 | Pods isolados **não utilizados** | ✅ | Nenhum `kind: Pod` nos manifestos |
 | **ConfigMap** para configurações não-sensíveis | ✅ | `k8s/configmap.yaml` — Kafka topics, URLs, environment |
-| **Secret** para dados sensíveis | ✅ | `k8s/secret.yaml` — connection string SQL, senha MongoDB |
+| **Secret** para dados sensíveis | ✅ | `catalog-api-secret`, criado fora do Git por `FIAP.Orchestration/scripts/create-k8s-secrets.sh` e injetado via `envFrom` |
 
 ### O que cada manifesto armazena
 
@@ -175,12 +174,22 @@ MongoDb__Host: "mongodb"
 ASPNETCORE_ENVIRONMENT: "Production"
 ```
 
-**Secret** (`k8s/secret.yaml`) — dados sensíveis, **nunca commitar com valores reais**:
-```yaml
-ConnectionStrings__DefaultConnection: "Server=sqlserver,1433;..."
-MongoDb__Username: "admin"
-MongoDb__Password: "PosTech@123"
+**Secret** (`catalog-api-secret`) — dados sensíveis, **sem manifesto versionado**. Chaves injetadas em tempo de execução:
+```text
+ConnectionStrings__DefaultConnection
+MongoDb__Username
+MongoDb__Password
 ```
+
+Para rodar com `dotnet run`, os mesmos valores ficam em User Secrets, fora do repositório:
+```powershell
+cd src/FIAP.CatalogAPI.Api
+dotnet user-secrets set "ConnectionStrings:DefaultConnection" "Server=localhost,1433;Database=CatalogAPI;User Id=sa;Password=<senha>;TrustServerCertificate=True"
+dotnet user-secrets set "MongoDb:Username" "<usuario>"
+dotnet user-secrets set "MongoDb:Password" "<senha>"
+```
+
+O `docker-compose.yml` deste repositório lê as credenciais de um `.env` fora do git; use o `.env.example` como base.
 
 ---
 
@@ -200,9 +209,6 @@ MongoDb__Password: "PosTech@123"
 
 ### `k8s/configmap.yaml`
 - Configurações não-sensíveis do serviço
-
-### `k8s/secret.yaml`
-- Credenciais e connection strings
 
 > **Infraestrutura compartilhada** (SQL Server, MongoDB, Redis, Kafka, Keycloak) está em `FIAP.Orchestration/k8s/` — o repositório central de orquestração.
 
@@ -279,9 +285,11 @@ cd C:\Users\mathf\source\repos\FIAP.CatalogAPI
 # Aplicar namespace (se ainda não existir)
 kubectl apply -f https://raw.githubusercontent.com/Projeto-Pos-Tech-FIAP/FIAP.Orchestration/main/k8s/00-namespace.yaml
 
+# Criar os Secrets a partir do .env do FIAP.Orchestration
+bash ..\FIAP.Orchestration\scripts\create-k8s-secrets.sh
+
 # Aplicar os manifestos do CatalogAPI
 kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/secret.yaml
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 ```
@@ -378,10 +386,10 @@ docker-compose down
 | Serviço | URL | Credenciais |
 |---|---|---|
 | CatalogAPI Swagger | http://localhost:5001/swagger | — |
-| Keycloak Admin | http://localhost:8180 | admin / PosTech@123 |
+| Keycloak Admin | http://localhost:8180 | definidas no `.env` |
 | Kafka UI | http://localhost:8090 | — |
-| SQL Server | localhost:1433 | sa / PosTech@123 |
-| MongoDB | localhost:27018 | admin / PosTech@123 |
+| SQL Server | localhost:1433 | `sa` / definida no `.env` |
+| MongoDB | localhost:27018 | definidas no `.env` |
 | Redis | localhost:6379 | — |
 
 ---
