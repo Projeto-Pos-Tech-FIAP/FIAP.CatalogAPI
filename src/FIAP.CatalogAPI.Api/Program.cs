@@ -18,7 +18,7 @@ builder.Services.AddSwaggerGen(options =>
     {
         Title = "FIAP CatalogAPI",
         Version = "v1",
-        Description = "Microserviço de catálogo de jogos com fluxo de compra via Kafka"
+        Description = "Microserviço de catálogo de jogos com busca avançada em Elasticsearch, cache em Redis e fluxo de compra via Kafka"
     });
 
     var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
